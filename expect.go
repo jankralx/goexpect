@@ -210,6 +210,8 @@ const (
 	BatchSwitchCase
 	// BatchSendSignal for invoking SendSignal in a batch.
 	BatchSendSignal
+	// BatchLabel for invoking Label in a output buffer.
+	BatchLabel
 )
 
 // TimeoutError is the error returned by all Expect functions upon timer expiry.
@@ -228,6 +230,8 @@ type BatchRes struct {
 	Output string
 	// Match regexp matches for expect command at Batcher[Idx].
 	Match []string
+	// moznost nastavit label
+	Label string
 }
 
 // Batcher interface is used to make it more straightforward and readable to create
@@ -641,6 +645,7 @@ func (e *GExpect) String() string {
 // array for any Expect command executed.
 func (e *GExpect) ExpectBatch(batch []Batcher, timeout time.Duration) ([]BatchRes, error) {
 	res := []BatchRes{}
+	label := ""
 	for i, b := range batch {
 		switch b.Cmd() {
 		case BatchExpect:
@@ -653,7 +658,7 @@ func (e *GExpect) ExpectBatch(batch []Batcher, timeout time.Duration) ([]BatchRe
 				to = timeout
 			}
 			out, match, err := e.Expect(re, to)
-			res = append(res, BatchRes{i, out, match})
+			res = append(res, BatchRes{i, out, match, label})
 			if err != nil {
 				return res, err
 			}
@@ -667,7 +672,7 @@ func (e *GExpect) ExpectBatch(batch []Batcher, timeout time.Duration) ([]BatchRe
 				to = timeout
 			}
 			out, match, _, err := e.ExpectSwitchCase(b.Cases(), to)
-			res = append(res, BatchRes{i, out, match})
+			res = append(res, BatchRes{i, out, match, label})
 			if err != nil {
 				return res, err
 			}
@@ -679,6 +684,8 @@ func (e *GExpect) ExpectBatch(batch []Batcher, timeout time.Duration) ([]BatchRe
 			if err := e.SendSignal(syscall.Signal(sigNr)); err != nil {
 				return res, err
 			}
+		case BatchLabel:
+			label = b.Arg()
 		default:
 			return res, errors.New("unknown command:" + strconv.Itoa(b.Cmd()))
 		}
