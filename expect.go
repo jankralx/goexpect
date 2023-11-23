@@ -237,19 +237,19 @@ type BatchRes struct {
 // Batcher interface is used to make it more straightforward and readable to create
 // batches of Expects.
 //
-// var batch = []Batcher{
-//	&BExpT{"password",8},
-//	&BSnd{"password\n"},
-//	&BExp{"olakar@router>"},
-//	&BSnd{ "show interface description\n"},
-//	&BExp{ "olakar@router>"},
-// }
+//	var batch = []Batcher{
+//		&BExpT{"password",8},
+//		&BSnd{"password\n"},
+//		&BExp{"olakar@router>"},
+//		&BSnd{ "show interface description\n"},
+//		&BExp{ "olakar@router>"},
+//	}
 //
-// var batchSwCaseReplace = []Batcher{
-//	&BCasT{[]Caser{
-//		&BCase{`([0-9]) -- .*\(MASTER\)`, `\1` + "\n"}}, 1},
-//	&BExp{`prompt/>`},
-// }
+//	var batchSwCaseReplace = []Batcher{
+//		&BCasT{[]Caser{
+//			&BCase{`([0-9]) -- .*\(MASTER\)`, `\1` + "\n"}}, 1},
+//		&BExp{`prompt/>`},
+//	}
 type Batcher interface {
 	// cmd returns the Batch command.
 	Cmd() int
@@ -342,6 +342,24 @@ func (bt *BExpT) Cases() []Caser {
 	return nil
 }
 
+type BLabel struct {
+	// L contains the label.
+	L string
+}
+
+func (bl *BLabel) Cmd() int {
+	return BatchLabel
+}
+func (bl *BLabel) Arg() string {
+	return bl.L
+}
+func (bl *BLabel) Timeout() time.Duration {
+	return time.Duration(0)
+}
+func (bl *BLabel) Cases() []Caser {
+	return nil
+}
+
 // BSnd implements the Batcher interface for Send commands.
 type BSnd struct {
 	S string
@@ -393,6 +411,11 @@ func (bc *BCas) Cases() []Caser {
 	return bc.C
 }
 
+// Label returns the label.
+func (bc *BCas) Label() string {
+	return ""
+}
+
 // BCasT implements the Batcher interfacs for SwitchCase commands, adding a timeout option
 // to the BCas type.
 type BCasT struct {
@@ -436,12 +459,23 @@ const (
 	NextTag
 	// NoTag signals no tag was set for this case.
 	NoTag
+	OKTagAcc
+	FailTagAcc
+	ContinueTagAcc
+	NextTagAcc
 )
 
 // OK returns the OK Tag and status.
 func OK() func() (Tag, *Status) {
 	return func() (Tag, *Status) {
 		return OKTag, NewStatus(codes.OK, "state reached")
+	}
+}
+
+// OK returns the OK Tag and status.
+func OKAcc() func() (Tag, *Status) {
+	return func() (Tag, *Status) {
+		return OKTagAcc, NewStatus(codes.OK, "state reached")
 	}
 }
 
@@ -452,6 +486,13 @@ func Fail(s *Status) func() (Tag, *Status) {
 	}
 }
 
+// Fail returns Fail Tag and status.
+func FailAcc(s *Status) func() (Tag, *Status) {
+	return func() (Tag, *Status) {
+		return FailTagAcc, s
+	}
+}
+
 // Continue returns the Continue Tag and status.
 func Continue(s *Status) func() (Tag, *Status) {
 	return func() (Tag, *Status) {
@@ -459,10 +500,24 @@ func Continue(s *Status) func() (Tag, *Status) {
 	}
 }
 
+// Continue returns the Continue Tag with accumulate and status.
+func ContinueAcc(s *Status) func() (Tag, *Status) {
+	return func() (Tag, *Status) {
+		return ContinueTagAcc, s
+	}
+}
+
 // Next returns the Next Tag and status.
 func Next() func() (Tag, *Status) {
 	return func() (Tag, *Status) {
 		return NextTag, NewStatus(codes.Unimplemented, "Next returns not implemented")
+	}
+}
+
+// Next returns the Next Tag and status.
+func NextAcc() func() (Tag, *Status) {
+	return func() (Tag, *Status) {
+		return NextTagAcc, NewStatus(codes.Unimplemented, "Next returns not implemented")
 	}
 }
 
@@ -711,9 +766,10 @@ func (e *GExpect) SendSignal(sig os.Signal) error {
 // ExpectSwitchCase checks each Case against the accumulated out buffer, sending specified
 // string back. Leaving Send empty will Send nothing to the process.
 // Substring expansion can be used eg.
-// 	Case{`vf[0-9]{2}.[a-z]{3}[0-9]{2}\.net).*UP`,`show arp \1`}
-// 	Given: vf11.hnd01.net            UP      35 (4)        34 (4)          CONNECTED         0              0/0
-// 	Would send: show arp vf11.hnd01.net
+//
+//	Case{`vf[0-9]{2}.[a-z]{3}[0-9]{2}\.net).*UP`,`show arp \1`}
+//	Given: vf11.hnd01.net            UP      35 (4)        34 (4)          CONNECTED         0              0/0
+//	Would send: show arp vf11.hnd01.net
 func (e *GExpect) ExpectSwitchCase(cs []Caser, timeout time.Duration) (string, []string, int, error) {
 	// Compile all regexps
 	rs := make([]*regexp.Regexp, 0, len(cs))
@@ -761,6 +817,7 @@ func (e *GExpect) ExpectSwitchCase(cs []Caser, timeout time.Duration) (string, [
 	if _, err := io.Copy(&tbuf, e); err != nil {
 		return tbuf.String(), nil, -1, fmt.Errorf("io.Copy failed: %v", err)
 	}
+	accumulated := ""
 	for {
 	L1:
 		for i, c := range cs {
@@ -774,6 +831,7 @@ func (e *GExpect) ExpectSwitchCase(cs []Caser, timeout time.Duration) (string, [
 
 			t, s := c.Tag()
 			if t == NextTag && !c.Retry() {
+				accumulated = ""
 				continue
 			}
 
@@ -816,27 +874,42 @@ func (e *GExpect) ExpectSwitchCase(cs []Caser, timeout time.Duration) (string, [
 					st = strings.Replace(st, `\\`+si, match[i], -1)
 				}
 			}
+			switch t {
+			case OKTagAcc, FailTagAcc, ContinueTagAcc, NextTagAcc:
+				if accumulated != "" {
+					accumulated += "\n"
+				}
+				accumulated += o
+			default:
+				accumulated = o
+			}
+
+			if t == NextTagAcc && !c.Retry() {
+				continue
+			}
+
 			// Don't send anything if string is empty.
 			if st != "" {
 				if err := e.Send(st); err != nil {
-					return o, match, i, fmt.Errorf("failed to send: %q err: %v", st, err)
+					return accumulated, match, i, fmt.Errorf("failed to send: %q err: %v", st, err)
 				}
 			}
+
 			// Tag handling.
 			switch t {
-			case OKTag, FailTag, NoTag:
-				return o, match, i, s.Err()
-			case ContinueTag:
+			case OKTag, FailTag, NoTag, OKTagAcc, FailTagAcc:
+				return accumulated, match, i, s.Err()
+			case ContinueTag, ContinueTagAcc:
 				if !c.Retry() {
-					return o, match, i, s.Err()
+					return accumulated, match, i, s.Err()
 				}
 				break L1
-			case NextTag:
+			case NextTag, NextTagAcc:
 				break L1
 			default:
 				s = NewStatusf(codes.Unknown, "Tag: %d unknown, err: %v", t, s)
 			}
-			return o, match, i, s.Err()
+			return accumulated, match, i, s.Err()
 		}
 		if !e.check() {
 			nr, err := io.Copy(&tbuf, e)
